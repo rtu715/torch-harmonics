@@ -59,7 +59,6 @@ class RealSHT(nn.Module):
         """
 
         super().__init__()
-
         self.nlat = nlat
         self.nlon = nlon
         self.grid = grid
@@ -102,8 +101,7 @@ class RealSHT(nn.Module):
         """
         return f'nlat={self.nlat}, nlon={self.nlon},\n lmax={self.lmax}, mmax={self.mmax},\n grid={self.grid}, csphase={self.csphase}'
 
-    def forward(self, x: torch.Tensor):
-
+    def forward(self, x: torch.Tensor, half_prec: bool = False):
         assert(x.shape[-2] == self.nlat)
         assert(x.shape[-1] == self.nlon)
 
@@ -117,7 +115,11 @@ class RealSHT(nn.Module):
         out_shape = list(x.size())
         out_shape[-3] = self.lmax
         out_shape[-2] = self.mmax
-        xout = torch.zeros(out_shape, dtype=x.dtype, device=x.device)
+        if half_prec:
+            xout = torch.zeros(out_shape, dtype=torch.float16, device=x.device)
+            x = x.half()
+        else:
+            xout = torch.zeros(out_shape, dtype=x.dtype, device=x.device)
         
         # contraction
         xout[..., 0] = torch.einsum('...km,mlk->...lm', x[..., :self.mmax, 0], self.weights.to(x.dtype) )
@@ -177,17 +179,21 @@ class InverseRealSHT(nn.Module):
         """
         return f'nlat={self.nlat}, nlon={self.nlon},\n lmax={self.lmax}, mmax={self.mmax},\n grid={self.grid}, csphase={self.csphase}'
 
-    def forward(self, x: torch.Tensor):
+    def forward(self, x: torch.Tensor, half_prec: bool = False):
 
         assert(x.shape[-2] == self.lmax)
         assert(x.shape[-1] == self.mmax)
         
         # Evaluate associated Legendre functions on the output nodes
         x = torch.view_as_real(x)
-        
+        if half_prec:
+            x = x.half()
         rl = torch.einsum('...lm, mlk->...km', x[..., 0], self.pct.to(x.dtype) )
         im = torch.einsum('...lm, mlk->...km', x[..., 1], self.pct.to(x.dtype) )
-        xs = torch.stack((rl, im), -1)
+        if half_prec:
+            xs = torch.stack((rl, im), -1).half()
+        else:
+            xs = torch.stack((rl, im), -1)
 
         # apply the inverse (real) FFT
         x = torch.view_as_complex(xs)

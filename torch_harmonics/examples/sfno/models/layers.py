@@ -252,6 +252,7 @@ class SpectralConvS2(nn.Module):
             from .contractions import contract_blockdiag as _contract
         elif self.operator_type == 'driscoll-healy':
             weight_shape += [self.modes_lat]
+            #this is called
             from .contractions import contract_dhconv as _contract
         else:
             raise NotImplementedError(f"Unkonw operator type f{self.operator_type}")
@@ -271,29 +272,32 @@ class SpectralConvS2(nn.Module):
             self.bias = nn.Parameter(scale * torch.randn(1, out_channels, 1, 1))
 
         
-    def forward(self, x):
-
+    def forward(self, x, half_fno=False):
+        
         dtype = x.dtype
-        x = x.float()
+        if not half_fno:
+            x = x.float()
         residual = x
-
+        if half_fno:
+            x = torch.tanh(x)
         with amp.autocast(enabled=False):
             x = self.forward_transform(x)
             if self.scale_residual:
                 residual = self.inverse_transform(x)
-
-
-        x = torch.view_as_real(x)
-        x = self._contract(x, self.weight)
-        x = torch.view_as_complex(x)
-
+        if half_fno:
+            x = torch.view_as_real(x)
+            x = self._contract(x, self.weight).half()
+            x = torch.view_as_complex(x)
+        else:
+            x = torch.view_as_real(x)
+            x = self._contract(x, self.weight)
+            x = torch.view_as_complex(x)
         with amp.autocast(enabled=False):
             x = self.inverse_transform(x)
-            
         if hasattr(self, 'bias'):
             x = x + self.bias
         x = x.type(dtype)
-    
+        
         return x, residual
 
 class FactorizedSpectralConvS2(nn.Module):
@@ -313,7 +317,8 @@ class FactorizedSpectralConvS2(nn.Module):
                  separable = False,
                  implementation = 'factorized',
                  decomposition_kwargs=dict(),
-                 bias = False):
+                 bias = False,
+                ):
         super(SpectralConvS2, self).__init__()
 
         if scale == 'auto':
@@ -372,21 +377,26 @@ class FactorizedSpectralConvS2(nn.Module):
             self.bias = nn.Parameter(scale * torch.randn(1, out_channels, 1, 1))
 
         
-    def forward(self, x):
+    def forward(self, x, half_fno=False):
 
         dtype = x.dtype
-        x = x.float()
+        if not half_fno:
+            x = x.float()
         residual = x
 
         with amp.autocast(enabled=False):
-            x = self.forward_transform(x)
+            #if half_fno:
+            #    x = torch.tanh(x)
+            x = self.forward_transform(x, half_prec=half_fno)
             if self.scale_residual:
-                residual = self.inverse_transform(x)
-
-        x = self._contract(x, self.weight, separable=self.separable, operator_type=self.operator_type)
-
+                residual = self.inverse_transform(x, half_prec=half_fno)
+        if half_fno:
+            x = x.chalf()
+            x = self._contract(x, self.weight, separable=self.separable, operator_type=self.operator_type).chalf()
+        else:
+            x = self._contract(x, self.weight, separable=self.separable, operator_type=self.operator_type)
         with amp.autocast(enabled=False):
-            x = self.inverse_transform(x)
+            x = self.inverse_transform(x, half_prec=half_fno)
             
         if hasattr(self, 'bias'):
             x = x + self.bias

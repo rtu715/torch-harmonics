@@ -29,6 +29,7 @@
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #
 
+import subprocess
 import os
 import time
 
@@ -43,6 +44,7 @@ from torch.cuda import amp
 import numpy as np
 import pandas as pd
 
+
 import matplotlib.pyplot as plt
 
 from torch_harmonics.examples.sfno import PdeDataset
@@ -51,6 +53,19 @@ from torch_harmonics.examples.sfno import SphericalFourierNeuralOperatorNet as S
 # wandb logging
 import wandb
 wandb.login()
+
+def get_gpu_memory_map():
+    result = subprocess.check_output(
+        [
+            'nvidia-smi', '--query-compute-apps=pid,used_memory', 
+            '--format=csv,nounits,noheader'
+        ], encoding='utf-8')
+    # Convert lines into a dataframe
+    df = pd.DataFrame([x.split(',') for x in result.strip().split('\n')], 
+                      columns=['pid', 'memory.used [MiB]'])
+    df['pid'] = df['pid'].apply(int)
+    df['memory.used [MiB]'] = df['memory.used [MiB]'].apply(int)
+    return df
 
 def l2loss_sphere(solver, prd, tar, relative=False, squared=False):
     loss = solver.integrate_grid((prd - tar)**2, dimensionless=True).sum(dim=-1)
@@ -153,14 +168,14 @@ def fluct_l2loss_sphere(solver, prd, tar, inp, relative=False, polar_opt=0):
     return loss
 
 
-def main(train=True, load_checkpoint=False, enable_amp=False):
+def main(train=True, load_checkpoint=False, enable_amp=False, half_fno=False, precision_schedule=False):
 
     # set seed
     torch.manual_seed(333)
     torch.cuda.manual_seed(333)
 
     # set device
-    device = torch.device('cuda:1' if torch.cuda.is_available() else 'cpu')
+    device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
     if torch.cuda.is_available():
         torch.cuda.set_device(device.index)
 
@@ -178,11 +193,19 @@ def main(train=True, load_checkpoint=False, enable_amp=False):
     nlon = dataset.nlon
 
     # training function
-    def train_model(model, dataloader, optimizer, gscaler, scheduler=None, nepochs=20, nfuture=0, num_examples=256, num_valid=8, loss_fn='l2'):
-
+    def train_model(model, dataloader, optimizer, gscaler, scheduler=None, nepochs=20, nfuture=0, num_examples=256, num_valid=8, loss_fn='l2', half_fno=False):
         train_start = time.time()
-
+        current_pid = os.getpid()
+        df = get_gpu_memory_map()
+        memory_used = df[df['pid'] == current_pid]['memory.used [MiB]'].values[0]
+        print(f"Memory used by current process (before training): {memory_used} MiB")
         for epoch in range(nepochs):
+            measured_GPU = False
+            
+            #precision schedule
+            if precision_schedule and epoch >= 0.5 * nepochs:
+                half_fno = False
+                print('Switching to single precision')
 
             # time each epoch
             epoch_start = time.time()
@@ -194,13 +217,20 @@ def main(train=True, load_checkpoint=False, enable_amp=False):
             acc_loss = 0
             model.train()
 
-            for inp, tar in dataloader:
+            for idx, (inp, tar) in enumerate(dataloader):
                 
                 with amp.autocast(enabled=enable_amp):
-
-                    prd = model(inp)
+                    prd = model(inp, half_fno=half_fno)
                     for _ in range(nfuture):
-                        prd = model(prd)
+                        prd = model(prd, half_fno=half_fno)
+                    
+                    #measure memory
+                    if not measured_GPU and idx > 10:
+                        current_pid = os.getpid()
+                        df = get_gpu_memory_map()
+                        memory_used = df[df['pid'] == current_pid]['memory.used [MiB]'].values[0]
+                        print(f"Memory used by current process: {memory_used} MiB")
+                        measured_GPU = True
 
                     if loss_fn == 'l2':
                         loss = l2loss_sphere(solver, prd, tar, relative=False)
@@ -250,6 +280,7 @@ def main(train=True, load_checkpoint=False, enable_amp=False):
             print(f'time taken: {epoch_time}')
             print(f'accumulated training loss: {acc_loss}')
             print(f'relative validation loss: {valid_loss}')
+            torch.cuda.empty_cache()
 
             if wandb.run is not None:
                 current_lr = optimizer.param_groups[0]['lr']
@@ -284,8 +315,8 @@ def main(train=True, load_checkpoint=False, enable_amp=False):
             start_time = time.time()
             for i in range(1, autoreg_steps+1):
                 # evaluate the ML model
-                prd = model(prd)
-
+                prd = model(prd, half_fno=False)
+                '''
                 if iic == nics-1 and nskip > 0 and i % nskip == 0:
 
                     # do plotting
@@ -293,7 +324,7 @@ def main(train=True, load_checkpoint=False, enable_amp=False):
                     dataset.solver.plot_griddata(prd[0, plot_channel], fig, vmax=4, vmin=-4)
                     plt.savefig(path_root+'_pred_'+str(i//nskip)+'.png')
                     plt.clf()
-
+                '''
             fno_times[iic] = time.time() - start_time
 
             # classical model
@@ -302,7 +333,7 @@ def main(train=True, load_checkpoint=False, enable_amp=False):
                 
                 # advance classical model
                 uspec = dataset.solver.timestep(uspec, nsteps)
-
+                '''
                 if iic == nics-1 and i % nskip == 0 and nskip > 0:
                     ref = (dataset.solver.spec2grid(uspec) - inp_mean) / torch.sqrt(inp_var)
 
@@ -310,7 +341,7 @@ def main(train=True, load_checkpoint=False, enable_amp=False):
                     dataset.solver.plot_griddata(ref[plot_channel], fig, vmax=4, vmin=-4)
                     plt.savefig(path_root+'_truth_'+str(i//nskip)+'.png')
                     plt.clf()
-
+                '''
             nwp_times[iic] = time.time() - start_time
 
             # ref = (dataset.solver.spec2grid(uspec) - inp_mean) / torch.sqrt(inp_var)
@@ -333,15 +364,23 @@ def main(train=True, load_checkpoint=False, enable_amp=False):
     # models['unet_baseline'] = partial(UNet)
 
     # SFNO models
-    models['sfno_sc3_layer4_edim256_linear']    = partial(SFNO, spectral_transform='sht', filter_type='linear', img_size=(nlat, nlon),
-                                                     num_layers=4, scale_factor=3, embed_dim=256, operator_type='driscoll-healy')
-    models['sfno_sc3_layer4_edim256_real']      = partial(SFNO, spectral_transform='sht', filter_type='non-linear', img_size=(nlat, nlon),
-                                                     num_layers=4, scale_factor=3, embed_dim=256, complex_activation = 'real', operator_type='diagonal')
+    #models['sfno_sc4_layer4_edim256_linear']    = partial(SFNO, spectral_transform='sht', filter_type='linear', img_size=(nlat, nlon),
+    #                                                 num_layers=4, scale_factor=4, embed_dim=256, operator_type='driscoll-healy')
+    #models['sfno_sc4_layer4_edim384_linear']    = partial(SFNO, spectral_transform='sht', filter_type='linear', img_size=(nlat, nlon),
+    #                                                 num_layers=4, scale_factor=4, embed_dim=384, operator_type='driscoll-healy')
+    models['sfno_sc4_layer4_edim512_linear']    = partial(SFNO, spectral_transform='sht', filter_type='linear', img_size=(nlat, nlon),
+                                                      num_layers=4, scale_factor=4, embed_dim=512, operator_type='driscoll-healy')
+    #haven't debugged the non-linear version yet
+    '''
+    models['sfno_sc4_layer4_edim256_real']      = partial(SFNO, spectral_transform='sht', filter_type='non-linear', img_size=(nlat, nlon),
+                                                     num_layers=4, scale_factor=4, embed_dim=256, complex_activation = 'real', operator_type='diagonal')
+    
     # FNO models
     models['fno_sc3_layer4_edim256_linear']     = partial(SFNO, spectral_transform='fft', filter_type='linear', img_size=(nlat, nlon),
                                                      num_layers=4, scale_factor=3, embed_dim=256, operator_type='diagonal')
     models['fno_sc3_layer4_edim256_real']       = partial(SFNO, spectral_transform='fft', filter_type='non-linear', img_size=(nlat, nlon),
                                                      num_layers=4, scale_factor=3, embed_dim=256, complex_activation='real')
+    '''
 
     # iterate over models and train each model
     root_path = os.path.dirname(__file__)
@@ -360,27 +399,29 @@ def main(train=True, load_checkpoint=False, enable_amp=False):
 
         # run the training
         if train:
-            run = wandb.init(project="sfno spherical swe", group=model_name, name=model_name + '_' + str(time.time()), config=model_handle.keywords)
+            run = wandb.init(project="fno", group='', name=model_name + '_' + str(time.time()), config=model_handle.keywords)
 
             # optimizer:
             optimizer = torch.optim.Adam(model.parameters(), lr=1E-3)
-            scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min')
+            scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', factor=0.5, patience=5)
             gscaler = amp.GradScaler(enabled=enable_amp)
 
             start_time = time.time()
 
             print(f'Training {model_name}, single step')
-            train_model(model, dataloader, optimizer, gscaler, scheduler, nepochs=200, loss_fn='l2')
 
+            train_model(model, dataloader, optimizer, gscaler, scheduler, nepochs=200, loss_fn='l2', half_fno=half_fno) #200 epochs
+
+            '''
             # multistep training
             print(f'Training {model_name}, two step')
             optimizer = torch.optim.Adam(model.parameters(), lr=5E-5)
             scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min')
             gscaler = amp.GradScaler(enabled=enable_amp)
             dataloader.dataset.nsteps = 2 * dt//dt_solver
-            train_model(model, dataloader, optimizer, gscaler, scheduler, nepochs=20, nfuture=1)
+            train_model(model, dataloader, optimizer, gscaler, scheduler, nepochs=20, nfuture=1, half_fno=half_fno) #20 epochs
             dataloader.dataset.nsteps = 1 * dt//dt_solver
-
+            '''
             training_time = time.time() - start_time
 
             run.finish()
@@ -403,10 +444,11 @@ def main(train=True, load_checkpoint=False, enable_amp=False):
                 metrics[model_name]['training_time'] = training_time
 
     df = pd.DataFrame(metrics)
-    df.to_pickle(os.path.join(root_path, 'output_data/metrics.pkl'))
+    #df.to_pickle(os.path.join(root_path, 'output_data/metrics.pkl'))
+    df.to_csv(os.path.join(root_path, f'output_data/{model_name}.txt'), sep=',', index=False)
 
 if __name__ == "__main__":
     import torch.multiprocessing as mp
     mp.set_start_method('forkserver', force=True)
 
-    main(train=True, load_checkpoint=False, enable_amp=False)
+    main(train=True, load_checkpoint=False, enable_amp=True, half_fno=True, precision_schedule=False)

@@ -30,6 +30,7 @@
 #
 
 import torch
+import opt_einsum as oe
 
 """
 Contains complex contractions wrapped into jit for harmonic layers
@@ -42,12 +43,23 @@ def contract_diagonal(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     res = torch.einsum("bixy,kixy->bkxy", ac, bc)
     return torch.view_as_real(res)
 
-@torch.jit.script
+#@torch.jit.script
 def contract_dhconv(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-    ac = torch.view_as_complex(a)
-    bc = torch.view_as_complex(b)
-    res = torch.einsum("bixy,kix->bkxy", ac, bc)
-    return torch.view_as_real(res)
+    # Given the shapes:
+    # a: [4, 256, 64, 65, 2]
+    # b: [256, 256, 64, 2]
+    if a.dtype == torch.float16:
+        #use p, q for dimensions of real + imaginary parts
+        tmp = oe.contract("bixyp,kixq->pqbkxy", a, b.half())
+        result = torch.stack([tmp[0, 0, ...] - tmp[1, 1, ...], tmp[1, 0, ...] + tmp[0, 1, ...]], dim=-1)
+        return result 
+    
+    else:
+        ac = torch.view_as_complex(a)
+        bc = torch.view_as_complex(b)
+        res = torch.einsum("bixy,kix->bkxy", ac, bc)
+
+        return torch.view_as_real(res)
 
 @torch.jit.script
 def contract_blockdiag(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:

@@ -109,8 +109,8 @@ class SpectralFilterLayer(nn.Module):
         else:
             raise(NotImplementedError)
 
-    def forward(self, x):
-        return self.filter(x)
+    def forward(self, x, half_fno=False):
+        return self.filter(x, half_fno=half_fno)
 
 class SphericalFourierNeuralOperatorBlock(nn.Module):
     """
@@ -205,15 +205,16 @@ class SphericalFourierNeuralOperatorBlock(nn.Module):
         # second normalisation layer
         self.norm1 = norm_layer()
 
-    def forward(self, x):
+    def forward(self, x, half_fno=False):
 
-        x, residual = self.filter(x)
+        x, residual = self.filter(x, half_fno=half_fno)
 
-        if hasattr(self, "inner_skip"):
+        if hasattr(self, 'inner_skip'):
             if self.concat_skip:
                 x = torch.cat((x, self.inner_skip(residual)), dim=1)
                 x = self.inner_skip_conv(x)
             else:
+                #residual = residual.float() #only for only half
                 x = x + self.inner_skip(residual)
 
         if hasattr(self, "act_layer"):
@@ -378,6 +379,7 @@ class SphericalFourierNeuralOperatorNet(nn.Module):
             raise ValueError(f"Unknown activation function {activation_function}")
 
         # compute downsampled image size
+        #print(self.img_size, scale_factor)
         self.h = self.img_size[0] // scale_factor
         self.w = self.img_size[1] // scale_factor
 
@@ -419,11 +421,13 @@ class SphericalFourierNeuralOperatorNet(nn.Module):
 
             modes_lat = int(self.h * self.hard_thresholding_fraction)
             modes_lon = int((self.w // 2 + 1) * self.hard_thresholding_fraction)
+            #print(modes_lat, modes_lon)
 
             self.trans_down = RealSHT(*self.img_size, lmax=modes_lat, mmax=modes_lon, grid="equiangular").float()
             self.itrans_up  = InverseRealSHT(*self.img_size, lmax=modes_lat, mmax=modes_lon, grid="equiangular").float()
             self.trans      = RealSHT(self.h, self.w, lmax=modes_lat, mmax=modes_lon, grid="legendre-gauss").float()
             self.itrans     = InverseRealSHT(self.h, self.w, lmax=modes_lat, mmax=modes_lon, grid="legendre-gauss").float()
+
 
         elif self.spectral_transform == "fft":
 
@@ -443,13 +447,12 @@ class SphericalFourierNeuralOperatorNet(nn.Module):
 
             first_layer = i == 0
             last_layer = i == self.num_layers-1
-
             forward_transform = self.trans_down if first_layer else self.trans
             inverse_transform = self.itrans_up if last_layer else self.itrans
 
             inner_skip = 'linear'
             outer_skip = 'identity'
-
+        
             if first_layer:
                 norm_layer = norm_layer1
             elif last_layer:
@@ -504,26 +507,24 @@ class SphericalFourierNeuralOperatorNet(nn.Module):
     def no_weight_decay(self):
         return {"pos_embed", "cls_token"}
 
-    def forward_features(self, x):
-
+    def forward_features(self, x, half_fno=False):
         x = self.pos_drop(x)
 
         for blk in self.blocks:
-            x = blk(x)
-            
+            if self.training and half_fno and torch.is_autocast_enabled():
+                x = x.half()
+            x = blk(x, half_fno=half_fno)
         return x
 
-    def forward(self, x):
+    def forward(self, x, half_fno=False):
 
         if self.big_skip:
             residual = x
-
         x = self.encoder(x)
 
         if self.pos_embed is not None:
             x = x + self.pos_embed
-
-        x = self.forward_features(x)
+        x = self.forward_features(x, half_fno=half_fno)
 
         if self.big_skip:
             x = torch.cat((x, residual), dim=1)

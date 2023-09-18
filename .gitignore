@@ -1,1 +1,12 @@
 *.DS_Store
+build/
+examples/checkpoints/
+examples/output_data/
+examples/paper_figures/
+examples/wandb/
+torch_harmonics.egg-info/
+torch_harmonics/__pycache__/
+torch_harmonics/examples/__pycache__/
+torch_harmonics/examples/sfno/__pycache__/
+torch_harmonics/examples/sfno/models/__pycache__/
+torch_harmonics/examples/sfno/utils/__pycache__/

@@ -33,6 +33,7 @@ import torch
 
 import tensorly as tl
 tl.set_backend('pytorch')
+from opt_einsum import contract
 
 from tltorch.factorized_tensors.core import FactorizedTensor
 
@@ -63,12 +64,15 @@ def _contract_dense(x, weight, separable=False, operator_type='diagonal'):
         weight_syms.pop()
     else:
         raise ValueError(f"Unkonw operator type {operator_type}")
-
     eq= ''.join(x_syms) + ',' + ''.join(weight_syms) + '->' + ''.join(out_syms)
-
     if not torch.is_tensor(weight):
         weight = weight.to_tensor()
 
+    if x.dtype == torch.complex32:
+        x = x.chalf()
+        weight = weight.chalf()
+        return contract(eq, x, weight)
+    
     return tl.einsum(eq, x, weight)
 
 def _contract_cp(x, cp_weight, separable=False, operator_type='diagonal'):
