@@ -181,19 +181,19 @@ def main(train=True, load_checkpoint=False, enable_amp=False, half_fno=False, pr
 
     # 1 hour prediction steps
     dt = 1*3600
-    dt_solver = 150
+    dt_solver = 200
     nsteps = dt//dt_solver
     dataset = PdeDataset(dt=dt, nsteps=nsteps, dims=(256, 512), device=device, normalize=True)
     # There is still an issue with parallel dataloading. Do NOT use it at the moment     
-    # dataloader = DataLoader(dataset, batch_size=4, shuffle=True, num_workers=4, persistent_workers=True)
-    dataloader = DataLoader(dataset, batch_size=4, shuffle=True, num_workers=0, persistent_workers=False)
+    # dataloader = DataLoader(dataset, batch_size=12, shuffle=True, num_workers=1, persistent_workers=True)
+    dataloader = DataLoader(dataset, batch_size=6, shuffle=True, num_workers=0, persistent_workers=False)
     solver = dataset.solver.to(device)
 
     nlat = dataset.nlat
     nlon = dataset.nlon
 
     # training function
-    def train_model(model, dataloader, optimizer, gscaler, scheduler=None, nepochs=20, nfuture=0, num_examples=256, num_valid=8, loss_fn='l2', half_fno=False):
+    def train_model(model, dataloader, optimizer, gscaler, scheduler=None, nepochs=20, nfuture=0, num_examples=120, num_valid=4, loss_fn='l2', half_fno=False, compile=False):
         train_start = time.time()
         current_pid = os.getpid()
         df = get_gpu_memory_map()
@@ -225,7 +225,7 @@ def main(train=True, load_checkpoint=False, enable_amp=False, half_fno=False, pr
                         prd = model(prd, half_fno=half_fno)
                     
                     #measure memory
-                    if not measured_GPU and idx > 10:
+                    if not measured_GPU and idx > 5:
                         current_pid = os.getpid()
                         df = get_gpu_memory_map()
                         memory_used = df[df['pid'] == current_pid]['memory.used [MiB]'].values[0]
@@ -253,22 +253,22 @@ def main(train=True, load_checkpoint=False, enable_amp=False, half_fno=False, pr
 
             acc_loss = acc_loss / len(dataloader.dataset)
 
-            dataloader.dataset.set_initial_condition('random')
-            dataloader.dataset.set_num_examples(num_valid)
+            # dataloader.dataset.set_initial_condition('random')
+            # dataloader.dataset.set_num_examples(num_valid)
 
             # perform validation
             valid_loss = 0
-            model.eval()
-            with torch.no_grad():
-                for inp, tar in dataloader:
-                    prd = model(inp)
-                    for _ in range(nfuture):
-                        prd = model(prd)
-                    loss = l2loss_sphere(solver, prd, tar, relative=True)
+            # model.eval()
+            # with torch.no_grad():
+            #     for inp, tar in dataloader:
+            #         prd = model(inp)
+            #         for _ in range(nfuture):
+            #             prd = model(prd)
+            #         loss = l2loss_sphere(solver, prd, tar, relative=True)
 
-                    valid_loss += loss.item() * inp.size(0)
+            #         valid_loss += loss.item() * inp.size(0)
 
-            valid_loss = valid_loss / len(dataloader.dataset)
+            # valid_loss = valid_loss / len(dataloader.dataset)
 
             if scheduler is not None:
                 scheduler.step(valid_loss)
@@ -370,23 +370,15 @@ def main(train=True, load_checkpoint=False, enable_amp=False, half_fno=False, pr
     #                                                 num_layers=4, scale_factor=4, embed_dim=384, operator_type='driscoll-healy')
     models['sfno_sc4_layer4_edim512_linear']    = partial(SFNO, spectral_transform='sht', filter_type='linear', img_size=(nlat, nlon),
                                                       num_layers=4, scale_factor=4, embed_dim=512, operator_type='driscoll-healy')
-    #haven't debugged the non-linear version yet
-    '''
-    models['sfno_sc4_layer4_edim256_real']      = partial(SFNO, spectral_transform='sht', filter_type='non-linear', img_size=(nlat, nlon),
-                                                     num_layers=4, scale_factor=4, embed_dim=256, complex_activation = 'real', operator_type='diagonal')
-    
-    # FNO models
-    models['fno_sc3_layer4_edim256_linear']     = partial(SFNO, spectral_transform='fft', filter_type='linear', img_size=(nlat, nlon),
-                                                     num_layers=4, scale_factor=3, embed_dim=256, operator_type='diagonal')
-    models['fno_sc3_layer4_edim256_real']       = partial(SFNO, spectral_transform='fft', filter_type='non-linear', img_size=(nlat, nlon),
-                                                     num_layers=4, scale_factor=3, embed_dim=256, complex_activation='real')
-    '''
+
 
     # iterate over models and train each model
     root_path = os.path.dirname(__file__)
     for model_name, model_handle in models.items():
 
         model = model_handle().to(device)
+        # if compile:
+        #     model = torch.compile(model)
 
         metrics[model_name] = {}
 
@@ -399,10 +391,10 @@ def main(train=True, load_checkpoint=False, enable_amp=False, half_fno=False, pr
 
         # run the training
         if train:
-            run = wandb.init(project="fno", group='', name=model_name + '_' + str(time.time()), config=model_handle.keywords)
+            run = wandb.init(project="half-precision sfno", group='', name=model_name + '_' + str(time.time()), config=model_handle.keywords)
 
             # optimizer:
-            optimizer = torch.optim.Adam(model.parameters(), lr=1E-3)
+            optimizer = torch.optim.AdamW(model.parameters(), lr=1E-3, fused=True)
             scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', factor=0.5, patience=5)
             gscaler = amp.GradScaler(enabled=enable_amp)
 
@@ -415,7 +407,7 @@ def main(train=True, load_checkpoint=False, enable_amp=False, half_fno=False, pr
             '''
             # multistep training
             print(f'Training {model_name}, two step')
-            optimizer = torch.optim.Adam(model.parameters(), lr=5E-5)
+            optimizer = torch.optim.AdamW(model.parameters(), lr=5E-5, fused=True)
             scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min')
             gscaler = amp.GradScaler(enabled=enable_amp)
             dataloader.dataset.nsteps = 2 * dt//dt_solver
