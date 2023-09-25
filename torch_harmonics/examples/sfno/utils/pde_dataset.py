@@ -90,26 +90,26 @@ class PdeDataset(torch.utils.data.Dataset):
 
     def __getitem__(self, index):
 
-        if self.stream is None:
-            self.stream = torch.cuda.Stream()
+        # if self.stream is None:
+        #     self.stream = torch.cuda.Stream()
 
-        with torch.cuda.stream(self.stream):
-            with torch.inference_mode():
-                with torch.no_grad():
-                    inp, tar = self._get_sample()
+        # with torch.cuda.stream(self.stream):
+        #     with torch.inference_mode():
+        #         with torch.no_grad():
+        #             inp, tar = self._get_sample()
 
-                    if self.normalize:
-                        inp = (inp - self.inp_mean) / torch.sqrt(self.inp_var)
-                        tar = (tar - self.inp_mean) / torch.sqrt(self.inp_var)
+        #             if self.normalize:
+        #                 inp = (inp - self.inp_mean) / torch.sqrt(self.inp_var)
+        #                 tar = (tar - self.inp_mean) / torch.sqrt(self.inp_var)
 
-        self.stream.synchronize()
+        # self.stream.synchronize()
 
-        # with torch.inference_mode():
-        #     with torch.no_grad():
-        #         inp, tar = self._get_sample()
+        with torch.inference_mode():
+            with torch.no_grad():
+                inp, tar = self._get_sample()
 
-        #         if self.normalize:
-        #             inp = (inp - self.inp_mean) / torch.sqrt(self.inp_var)
-        #             tar = (tar - self.inp_mean) / torch.sqrt(self.inp_var)
+                if self.normalize:
+                    inp = (inp - self.inp_mean) / torch.sqrt(self.inp_var)
+                    tar = (tar - self.inp_mean) / torch.sqrt(self.inp_var)
 
         return inp.clone(), tar.clone()

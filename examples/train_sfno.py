@@ -185,7 +185,7 @@ def main(train=True, load_checkpoint=False, enable_amp=False, half_fno=False, pr
     nsteps = dt//dt_solver
     dataset = PdeDataset(dt=dt, nsteps=nsteps, dims=(256, 512), device=device, normalize=True)
     # There is still an issue with parallel dataloading. Do NOT use it at the moment     
-    # dataloader = DataLoader(dataset, batch_size=12, shuffle=True, num_workers=1, persistent_workers=True)
+    # dataloader = DataLoader(dataset, batch_size=6, shuffle=True, num_workers=1, persistent_workers=True)
     dataloader = DataLoader(dataset, batch_size=6, shuffle=True, num_workers=0, persistent_workers=False)
     solver = dataset.solver.to(device)
 
@@ -443,4 +443,4 @@ if __name__ == "__main__":
     import torch.multiprocessing as mp
     mp.set_start_method('forkserver', force=True)
 
-    main(train=True, load_checkpoint=False, enable_amp=True, half_fno=True, precision_schedule=False)
+    main(train=True, load_checkpoint=False, enable_amp=False, half_fno=True, precision_schedule=False)
